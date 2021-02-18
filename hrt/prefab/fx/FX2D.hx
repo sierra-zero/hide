@@ -4,6 +4,7 @@ import hrt.prefab.Prefab as PrefabElement;
 import hrt.prefab.fx.BaseFX.ObjectAnimation;
 import hrt.prefab.fx.BaseFX.ShaderAnimation;
 
+@:allow(hrt.prefab.fx.FX2D)
 class FX2DAnimation extends h2d.Object {
 
 	public var prefab : hrt.prefab.Prefab;
@@ -11,12 +12,15 @@ class FX2DAnimation extends h2d.Object {
 
 	public var playSpeed : Float;
 	public var localTime : Float = 0.0;
+	var prevTime = -1.0;
 	public var startLoop : Float = 0.0;
 	public var duration : Float;
 
 	public var loop : Bool;
 	public var objects: Array<ObjectAnimation> = [];
 	public var shaderAnims : Array<ShaderAnimation> = [];
+	public var emitters : Array<hrt.prefab.fx2d.Particle2D.Particles>;
+	public var events: Array<hrt.prefab.fx.Event.EventInstance>;
 
 	var evaluator : Evaluator;
 	var random : hxd.Rand;
@@ -32,6 +36,44 @@ class FX2DAnimation extends h2d.Object {
 	public function setRandSeed(seed: Int) {
 		random.init(seed);
 	}
+
+	function init(ctx: Context, def: FX2D) {
+		initEmitters(ctx, def);
+		if (def.children.length == 1 && def.children[0].name == "FXRoot")
+			events = initEvents(def.children[0], ctx);
+		else
+			events = initEvents(def, ctx);
+	}
+
+	function initEmitters(ctx: Context, elt: PrefabElement) {
+		var em = Std.downcast(elt, hrt.prefab.fx2d.Particle2D);
+		if(em != null)  {
+			for(emCtx in ctx.shared.getContexts(elt)) {
+				if(emCtx.local2d == null) continue;
+				if(emitters == null) emitters = [];
+				var emobj : hrt.prefab.fx2d.Particle2D.Particles = cast emCtx.local2d;
+				emitters.push(emobj);
+			}
+		}
+		else {
+			for(c in elt.children) {
+				initEmitters(ctx, c);
+			}
+		}
+	}
+
+	function initEvents(elt: PrefabElement, ctx: Context) {
+		var childEvents = [for(c in elt.children) if(c.to(Event) != null) c.to(Event)];
+		var ret = null;
+		for(evt in childEvents) {
+			var eventObj = evt.prepare(ctx);
+			if(eventObj == null) continue;
+			if(ret == null) ret = [];
+			ret.push(eventObj);
+		}
+		return ret;
+	}
+
 
 	public function setTime( time : Float ) {
 
@@ -51,8 +93,8 @@ class FX2DAnimation extends h2d.Object {
 
 			if(anim.position != null) {
 				var pos = evaluator.getVector(anim.position, time);
-				anim.obj2d.x = pos.x;
-				anim.obj2d.y = pos.y;
+				anim.obj2d.x = anim.elt2d.x + pos.x;
+				anim.obj2d.y = anim.elt2d.y + pos.y;
 			}
 
 			if(anim.visibility != null)
@@ -84,17 +126,21 @@ class FX2DAnimation extends h2d.Object {
 					}
 				}
 			}
-
-			if(anim.events != null) {
-				for(evt in anim.events) {
-					evt.setTime(time - evt.evt.time);
-				}
-			}
 		}
 
 		for(anim in shaderAnims) {
 			anim.setTime(time);
 		}
+		if (emitters != null) {
+			for(em in emitters) {
+				if(em.visible)
+					em.setTime(time);
+			}
+		}
+
+		Event.updateEvents(events, time, prevTime);
+
+		this.prevTime = localTime;
 	}
 }
 
@@ -200,21 +246,20 @@ class FX2D extends BaseFX {
 		fxanim.loop = loop;
 		fxanim.startLoop = startLoop;
 		ctx.local2d = fxanim;
+		ctx.local3d = null;
 		fxanim.playSpeed = 1.0;
 
 		#if editor
 		super.make(ctx);
 		#else
 		var root = getFXRoot(ctx, this);
-		if(root != null){
-			for( c in root.children ){
-				var co = Std.downcast(c , Constraint);
-				if(co == null) c.make(ctx);
-			}
-		}
-		else
+		if( root != null ) {
+			for( c in root.children )
+				makeChildren(ctx, c);
+		} else
 			super.make(ctx);
 		#end
+		fxanim.init(ctx, this);
 
 		getObjAnimations(ctx, this, fxanim.objects);
 		BaseFX.getShaderAnims(ctx, this, fxanim.shaderAnims);

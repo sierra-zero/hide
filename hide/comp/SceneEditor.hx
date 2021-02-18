@@ -1,5 +1,6 @@
 package hide.comp;
 
+import hrt.prefab.Reference;
 import h3d.col.Sphere;
 import h3d.scene.Mesh;
 import h3d.col.FPoint;
@@ -15,6 +16,8 @@ import hrt.prefab.Prefab as PrefabElement;
 import hrt.prefab.Object2D;
 import hrt.prefab.Object3D;
 import h3d.scene.Object;
+
+import hide.comp.cdb.DataFiles;
 
 enum SelectMode {
 	/**
@@ -71,6 +74,14 @@ class SceneEditorContext extends hide.prefab.EditContext {
 		}
 	}
 
+	override function screenToGround(x:Float, y:Float, ?forPrefab:hrt.prefab.Prefab) {
+		return editor.screenToGround(x, y, forPrefab);
+	}
+
+	override function positionToGroundZ(x:Float, y:Float, ?forPrefab:hrt.prefab.Prefab):Float {
+		return editor.getZ(x, y, forPrefab);
+	}
+
 	override function getCurrentProps( p : hrt.prefab.Prefab ) {
 		var cur = editor.curEdit;
 		return cur != null && cur.elements[0] == p ? editor.properties.element : new Element();
@@ -87,7 +98,7 @@ class SceneEditorContext extends hide.prefab.EditContext {
 
 	override function rebuildProperties() {
 		editor.scene.setCurrent();
-		editor.selectObjects(elements);
+		editor.selectObjects(elements, NoHistory);
 	}
 
 	override function rebuildPrefab( p : hrt.prefab.Prefab ) {
@@ -129,7 +140,6 @@ class SceneEditor {
 	public var editorDisplay(default,set) : Bool;
 	public var camera2D(default,set) : Bool = false;
 
-	var searchBox : Element;
 	var updates : Array<Float -> Void> = [];
 
 	var showGizmo = true;
@@ -148,6 +158,7 @@ class SceneEditor {
 
 	public var view(default, null) : hide.view.FileView;
 	var sceneData : PrefabElement;
+	var lastRenderProps : hrt.prefab.RenderProps;
 
 	public function new(view, data, ?chunkifyS3D : Bool = false) {
 		ide = hide.Ide.inst;
@@ -173,7 +184,7 @@ class SceneEditor {
 		scene.editor = this;
 		scene.onReady = onSceneReady;
 		scene.onResize = function() {
-			cameraController2D.toTarget();
+			if( cameraController2D != null ) cameraController2D.toTarget();
 			onResize();
 		};
 
@@ -191,12 +202,7 @@ class SceneEditor {
 		view.keys.register("duplicateInPlace", duplicate.bind(false));
 		view.keys.register("group", groupSelection);
 		view.keys.register("delete", () -> deleteElements(curEdit.rootElements));
-		view.keys.register("search", function() {
-			if(searchBox != null) {
-				searchBox.show();
-				searchBox.find("input").focus().select();
-			}
-		});
+		view.keys.register("search", function() tree.openFilter());
 		view.keys.register("rename", function () {
 			if(curEdit.rootElements.length > 0)
 				tree.editNode(curEdit.rootElements[0]);
@@ -211,8 +217,10 @@ class SceneEditor {
 		view.keys.register("sceneeditor.isolate", function() {	isolate(curEdit.elements); });
 		view.keys.register("sceneeditor.showAll", function() {	setVisible(context.shared.elements(), true); });
 		view.keys.register("sceneeditor.selectParent", function() {
-			if(curEdit.rootElements.length > 0)
-				selectObjects([curEdit.rootElements[0].parent]);
+			if(curEdit.rootElements.length > 0) {
+				var p = curEdit.rootElements[0].parent;
+				if( p != null && p != sceneData ) selectObjects([p]);
+			}
 		});
 		view.keys.register("sceneeditor.reparent", function() {
 			if(curEdit.rootElements.length > 1) {
@@ -252,6 +260,12 @@ class SceneEditor {
 		}
 	}
 
+	public function dispose() {
+		scene.dispose();
+		tree.dispose();
+		favTree.dispose();
+	}
+
 	function set_camera2D(b) {
 		if( cameraController != null ) cameraController.visible = !b;
 		if( cameraController2D != null ) cameraController2D.visible = b;
@@ -288,22 +302,6 @@ class SceneEditor {
 		return curEdit != null ? curEdit.elements : [];
 	}
 
-	public function addSearchBox(parent : Element) {
-		searchBox = new Element("<div>").addClass("searchBox").appendTo(parent);
-		new Element("<input type='text'>").appendTo(searchBox).keydown(function(e) {
-			if( e.keyCode == 27 ) {
-				searchBox.find("i").click();
-				return;
-			}
-		}).keyup(function(e) {
-			tree.searchFilter(e.getThis().val());
-		});
-		new Element("<i>").addClass("fa fa-times-circle").appendTo(searchBox).click(function(_) {
-			tree.searchFilter(null);
-			searchBox.toggle();
-		});
-	}
-
 	function makeCamController() {
 		var c = new h3d.scene.CameraController(scene.s3d);
 		c.friction = 0.9;
@@ -311,6 +309,15 @@ class SceneEditor {
 		c.zoomAmount = 1.05;
 		c.smooth = 0.7;
 		return c;
+	}
+
+	public function setFullScreen( b : Bool ) {
+		view.fullScreen = b;
+		if( b ) {
+			view.element.find(".tabs").hide();
+		} else {
+			view.element.find(".tabs").show();
+		}
 	}
 
 	function makeCamController2D() {
@@ -398,15 +405,13 @@ class SceneEditor {
 		cameraController.onClick = function(e) {
 			switch( e.button ) {
 			case K.MOUSE_RIGHT:
-				var ray = scene.s3d.camera.rayFromScreen(scene.s2d.mouseX, scene.s2d.mouseY);
-				var pt = ray.intersect(h3d.col.Plane.Z());
-				if( pt == null ) pt = new h3d.col.Point();
-				selectNewObject(pt);
+				selectNewObject();
 			case K.MOUSE_LEFT:
 				selectObjects([]);
 			}
 		};
-		resetCamera();
+		if (!camera2D)
+			resetCamera();
 
 
 		var cam = @:privateAccess view.getDisplayState("Camera");
@@ -428,18 +433,30 @@ class SceneEditor {
 			context.shared.root2d.setScale(cam2d.z);
 		}
 		cameraController2D.loadFromScene();
+		if (camera2D)
+			resetCamera();
 
 		scene.onUpdate = update;
 
 		// BUILD scene tree
 
+		var icons = new Map();
+		var iconsConfig = view.config.get("sceneeditor.icons");
+		for( f in Reflect.fields(iconsConfig) )
+			icons.set(f, Reflect.field(iconsConfig,f));
+
 		function makeItem(o:PrefabElement, ?state) : hide.comp.IconTree.IconTreeItem<PrefabElement> {
 			var p = o.getHideProps();
+			var ref = o.to(Reference);
+			var icon = p.icon;
+			var ct = o.getCdbType();
+			if( ct != null && icons.exists(ct) )
+				icon = icons.get(ct);
 			var r : hide.comp.IconTree.IconTreeItem<PrefabElement> = {
 				value : o,
 				text : o.name,
-				icon : "fa fa-"+p.icon,
-				children : o.children.length > 0,
+				icon : "fa fa-"+icon,
+				children : (o.children.length > 0 && !p.hideChildren) || (ref != null && @:privateAccess ref.editMode),
 				state: state
 			};
 			return r;
@@ -474,6 +491,11 @@ class SceneEditor {
 		}
 		tree.get = function(o:PrefabElement) {
 			var objs = o == null ? sceneData.children : Lambda.array(o);
+			var ref = o == null ? null : o.to(Reference);
+			@:privateAccess if( ref != null && ref.editMode && ref.ref != null ) {
+				for( c in ref.ref )
+					objs.push(c);
+			}
 			var out = [for( o in objs ) makeItem(o)];
 			return out;
 		};
@@ -496,26 +518,33 @@ class SceneEditor {
 				{ label : "Reference", enabled : current != null, click : function() createRef(current, current.parent) },
 			];
 
-			if(current != null && current.to(Object3D) != null && current.to(hrt.prefab.Reference) == null) {
+			var isObj = current != null && (current.to(Object3D) != null || current.to(Object2D) != null);
+			var isRef = current != null && current.to(hrt.prefab.Reference) != null;
+
+			if( isObj ) {
 				var visible = !isHidden(current);
 				var locked = isLocked(current);
 				menuItems = menuItems.concat([
 					{ label : "Visible", checked : visible, click : function() setVisible(curEdit.elements, !visible) },
-					{ label : "Locked", checked : locked, click : function() setLock(curEdit.elements, locked) },
+					{ label : "Locked", checked : locked, click : function() {
+						locked = !locked;
+						setLock(curEdit.elements, locked);
+					} },
 					{ label : "Select all", click : selectAll },
 					{ label : "Select children", enabled : current != null, click : function() selectObjects(current.flatten()) },
 				]);
-				actionItems = actionItems.concat([
-					{ label : "Isolate", click : function() isolate(curEdit.elements) },
-					{ label : "Group", enabled : curEdit != null && canGroupSelection(), click : groupSelection }
-				]);
+				if( !isRef )
+					actionItems = actionItems.concat([
+						{ label : "Isolate", click : function() isolate(curEdit.elements) },
+						{ label : "Group", enabled : curEdit != null && canGroupSelection(), click : groupSelection }
+					]);
 			}
-			else if(current != null) {
+			if( current != null && (!isObj || isRef) ) {
 				var enabled = current.enabled;
 				menuItems.push({ label : "Enable", checked : enabled, click : function() setEnabled(curEdit.elements, !enabled) });
 			}
 
-			if(current != null) {
+			if( current != null ) {
 				var menu = getTagMenu(current);
 				if(menu != null)
 					menuItems.push({ label : "Tag", menu: menu });
@@ -607,7 +636,7 @@ class SceneEditor {
 		sh.root2d.remove();
 
 		// Prevent leaks
-		var chunkiFiedScene = Std.downcast(scene.s3d, hide.Scene);
+		var chunkiFiedScene = Std.downcast(scene.s3d, hide.tools.ChunkedScene);
 		if( chunkiFiedScene != null )
 			chunkiFiedScene.reset();
 
@@ -632,7 +661,43 @@ class SceneEditor {
 		var all = sceneData.flatten(hrt.prefab.Prefab);
 		for(elt in all)
 			applySceneStyle(elt);
+
+		if( lastRenderProps == null ) {
+			var renderProps = getAllWithRefs(sceneData,hrt.prefab.RenderProps);
+			for( r in renderProps )
+				if( @:privateAccess r.isDefault ) {
+					lastRenderProps = r;
+					break;
+				}
+			if( lastRenderProps == null )
+				lastRenderProps = renderProps[0];
+		}
+
+		if( lastRenderProps != null )
+			lastRenderProps.applyProps(scene.s3d.renderer);
+		else {
+			var refPrefab = new Reference();
+			refPrefab.refpath = view.config.getLocal("scene.renderProps");
+			refPrefab.makeInstance(context);
+			if( @:privateAccess refPrefab.ref != null ) {
+				var renderProps = @:privateAccess refPrefab.ref.get(hrt.prefab.RenderProps);
+				if( renderProps != null )
+					renderProps.applyProps(scene.s3d.renderer);
+			}
+		}
+
 		onRefresh();
+	}
+
+	function getAllWithRefs<T:hrt.prefab.Prefab>( p : hrt.prefab.Prefab, cl : Class<T>, ?arr : Array<T> ) : Array<T> {
+		if( arr == null ) arr = [];
+		var v = p.to(cl);
+		if( v != null ) arr.push(v);
+		for( c in p.children )
+			getAllWithRefs(c, cl, arr);
+		var ref = p.to(Reference);
+		@:privateAccess if( ref != null && ref.ref != null ) getAllWithRefs(ref.ref, cl, arr);
+		return arr;
 	}
 
 	public dynamic function onRefresh() {
@@ -643,17 +708,19 @@ class SceneEditor {
 		var ctx = contexts[elt];
 		if( ctx == null )
 			return;
-		var obj3d = Std.downcast(elt, Object3D);
-		if( obj3d != null ) {
-			var int = obj3d.makeInteractive(ctx);
-			initInteractive(elt,int);
-		} else {
-			var obj2d = Std.downcast(elt, Object2D);
-			if( obj2d != null ) {
-				var int = obj2d.makeInteractive(ctx);
-				initInteractive(elt,int);
-			}
-		}
+		var int = elt.makeInteractive(ctx);
+		if( int == null ) return;
+		initInteractive(elt,cast int);
+		if( isLocked(elt) ) toggleInteractive(elt, false);
+	}
+
+	function toggleInteractive( e : PrefabElement, visible : Bool ) {
+		var int = getInteractive(e);
+		if( int == null ) return;
+		var i2d = Std.downcast(int,h2d.Interactive);
+		var i3d = Std.downcast(int,h3d.scene.Interactive);
+		if( i2d != null ) i2d.visible = visible;
+		if( i3d != null ) i3d.visible = visible;
 	}
 
 	function initInteractive( elt : PrefabElement, int : {
@@ -668,13 +735,14 @@ class SceneEditor {
 		var startDrag = null;
 		var curDrag = null;
 		var dragBtn = -1;
-		var i3d = Std.instance(int, h3d.scene.Interactive);
-		var i2d = Std.instance(int, h2d.Interactive);
+		var lastPush : Array<Float> = null;
+		var i3d = Std.downcast(int, h3d.scene.Interactive);
+		var i2d = Std.downcast(int, h2d.Interactive);
 		int.onClick = function(e) {
 			if(e.button == K.MOUSE_RIGHT) {
-				var pt = new h3d.Vector(e.relX,e.relY,e.relZ);
-				if( i3d != null ) i3d.localToGlobal(pt);
-				selectNewObject(pt.toPoint());
+				var dist = hxd.Math.distance(scene.s2d.mouseX - lastPush[0], scene.s2d.mouseY - lastPush[1]);
+				if( dist > 5 ) return;
+				selectNewObject();
 				e.propagate = false;
 				return;
 			}
@@ -682,6 +750,8 @@ class SceneEditor {
 		int.onPush = function(e) {
 			if( e.button == K.MOUSE_MIDDLE ) return;
 			startDrag = [scene.s2d.mouseX, scene.s2d.mouseY];
+			if( e.button == K.MOUSE_RIGHT )
+				lastPush = startDrag;
 			dragBtn = e.button;
 			if( e.button == K.MOUSE_LEFT ) {
 				var elts = null;
@@ -729,7 +799,7 @@ class SceneEditor {
 		}
 		int.onMove = function(e) {
 			if(startDrag != null && hxd.Math.distance(startDrag[0] - scene.s2d.mouseX, startDrag[1] - scene.s2d.mouseY) > 5 ) {
-				if(dragBtn == K.MOUSE_LEFT) {
+				if(dragBtn == K.MOUSE_LEFT ) {
 					if( i3d != null ) {
 						moveGizmoToSelection();
 						gizmo.startMove(MoveXY);
@@ -742,35 +812,23 @@ class SceneEditor {
 				int.preventClick();
 				startDrag = null;
 			}
-			/*
-			if( curDrag != null ) {
-				var dx = scene.s2d.mouseX - curDrag[0];
-				var dy = scene.s2d.mouseY - curDrag[1];
-				var obj = getContext(elt).local2d;
-				obj.x += Math.round(dx / context.shared.root2d.scaleX);
-				obj.y += Math.round(dy / context.shared.root2d.scaleY);
-				var o2d = Std.instance(elt,hrt.prefab.Object2D);
-				o2d.x = obj.x;
-				o2d.y = obj.y;
-				curDrag[0] += dx;
-				curDrag[1] += dy;
-			}*/
 		}
 		interactives.set(elt,cast int);
 	}
 
-	function selectNewObject( pt : h3d.col.Point ) {
+	function selectNewObject() {
 		var parentEl = sceneData;
 		 // for now always create at scene root, not `curEdit.rootElements[0];`
 		var group = getParentGroup(parentEl);
 		if( group != null )
 			parentEl = group;
+		var originPt = getPickTransform(parentEl).getPosition();
 		var newItems = getNewContextMenu(parentEl, function(newElt) {
 			var newObj3d = Std.downcast(newElt, Object3D);
 			if(newObj3d != null) {
 				var newPos = new h3d.Matrix();
 				newPos.identity();
-				newPos.setPosition(pt.toVector());
+				newPos.setPosition(originPt);
 				var invParent = getObject(parentEl).getAbsPos().clone();
 				invParent.invert();
 				newPos.multiply(newPos, invParent);
@@ -885,7 +943,7 @@ class SceneEditor {
 						obj3d.scaleY = quantize(scaleSnap(s.y), scaleQuant);
 						obj3d.scaleZ = quantize(scaleSnap(s.z), scaleQuant);
 					}
-					obj3d.applyPos(sceneObjs[i]);
+					obj3d.applyTransform(sceneObjs[i]);
 				}
 			}
 
@@ -896,14 +954,14 @@ class SceneEditor {
 					if( undo ) {
 						for(i in 0...objects3d.length) {
 							objects3d[i].loadTransform(prevState[i]);
-							objects3d[i].applyPos(sceneObjs[i]);
+							objects3d[i].applyTransform(sceneObjs[i]);
 						}
 						refreshProps();
 					}
 					else {
 						for(i in 0...objects3d.length) {
 							objects3d[i].loadTransform(newState[i]);
-							objects3d[i].applyPos(sceneObjs[i]);
+							objects3d[i].applyTransform(sceneObjs[i]);
 						}
 						refreshProps();
 					}
@@ -977,7 +1035,7 @@ class SceneEditor {
 					sceneObjs[i].parent.globalToLocal(pt);
 					obj.x = quantize(pt.x, posQuant);
 					obj.y = quantize(pt.y, posQuant);
-					obj.applyPos(sceneObjs[i]);
+					obj.applyTransform(sceneObjs[i]);
 				}
 			};
 			gizmo2d.onFinishMove = function() {
@@ -987,14 +1045,14 @@ class SceneEditor {
 					if( undo ) {
 						for(i in 0...objects2d.length) {
 							objects2d[i].loadTransform(prevState[i]);
-							objects2d[i].applyPos(sceneObjs[i]);
+							objects2d[i].applyTransform(sceneObjs[i]);
 						}
 						refreshProps();
 					}
 					else {
 						for(i in 0...objects2d.length) {
 							objects2d[i].loadTransform(newState[i]);
-							objects2d[i].applyPos(sceneObjs[i]);
+							objects2d[i].applyTransform(sceneObjs[i]);
 						}
 						refreshProps();
 					}
@@ -1161,9 +1219,9 @@ class SceneEditor {
 				lockTog = new Element('<i class="fa fa-lock lock-toggle"/>').insertAfter(el.find("a.jstree-anchor").first());
 				lockTog.click(function(e) {
 					if(curEdit.elements.indexOf(obj3d) >= 0)
-						setLock(curEdit.elements, isLocked(obj3d));
+						setLock(curEdit.elements, !isLocked(obj3d));
 					else
-						setLock([obj3d], isLocked(obj3d));
+						setLock([obj3d], !isLocked(obj3d));
 
 					e.preventDefault();
 					e.stopPropagation();
@@ -1199,15 +1257,19 @@ class SceneEditor {
 		return interactives.get(elt);
 	}
 
-	public function getContext(elt : PrefabElement) {
+	public function getContext(elt : PrefabElement, ?shared : hrt.prefab.ContextShared) {
 		if(elt == null) return null;
-		var ctx = null;
-		if(elt == sceneData) {
-			ctx = context.shared.contexts.get(sceneData);
-			if(ctx != null) return ctx; // Some libs make their own instances
-			return context;
+		if( shared == null ) shared = context.shared;
+		var ctx = shared.contexts.get(elt);
+		if( ctx == null ) {
+			for( r in @:privateAccess shared.refsContexts ) {
+				ctx = getContext(elt, r);
+				if( ctx != null ) break;
+			}
 		}
-		return context.shared.contexts.get(elt);
+		if( ctx == null && elt == sceneData )
+			ctx = context;
+		return ctx;
 	}
 
 	public function getContexts(elt: PrefabElement) {
@@ -1257,19 +1319,44 @@ class SceneEditor {
 
 	function makeInstance(elt: PrefabElement) {
 		scene.setCurrent();
-		var parentCtx = getContext(elt.parent);
+		var p = elt.parent;
+		var parentCtx = null;
+		while( p != null ) {
+			parentCtx = getContext(p);
+			if( parentCtx != null ) break;
+			p = p.parent;
+		}
 		var ctx = elt.make(parentCtx);
 		for( p in elt.flatten() )
 			makeInteractive(p);
 		scene.init(ctx.local3d);
 	}
 
-	public function addObject(elts : Array<PrefabElement>, selectObj : Bool = true, doRefresh : Bool = true) {
+	function refreshParents( elts : Array<PrefabElement> ) {
+		var parents = new Map();
+		for( e in elts ) {
+			if( e.parent == null ) throw e+" is missing parent";
+			parents.set(e.parent, true);
+		}
+		for( p in parents.keys() ) {
+			var h = p.getHideProps();
+			if( h.onChildListChanged != null ) h.onChildListChanged();
+		}
+		if( lastRenderProps != null && parents.exists(lastRenderProps) )
+			lastRenderProps.applyProps(scene.s3d.renderer);
+	}
+
+	public function addObject(elts : Array<PrefabElement>, selectObj : Bool = true, doRefresh : Bool = true, isTemporary = false) {
 		for (e in elts) {
 			makeInstance(e);
 		}
-		if (doRefresh)
+		if (doRefresh) {
 			refresh(Partial, if (selectObj) () -> selectObjects(elts, NoHistory) else null);
+			refreshParents(elts);
+		}
+		if( isTemporary )
+			return;
+
 		undo.change(Custom(function(undo) {
 			var fullRefresh = false;
 			if(undo) {
@@ -1287,12 +1374,92 @@ class SceneEditor {
 					makeInstance(e);
 				}
 				refresh(Partial, () -> selectObjects(elts,NoHistory));
+				refreshParents(elts);
 			}
 		}));
 	}
 
+	function makeCdbProps( e : PrefabElement, type : cdb.Sheet ) {
+		var props = type.getDefaults();
+		Reflect.setField(props, "$cdbtype", DataFiles.getTypeName(type));
+		if( type.idCol != null && !type.idCol.opt ) {
+			var id = new haxe.io.Path(view.state.path).file;
+			id = id.charAt(0).toUpperCase() + id.substr(1);
+			id += "_"+e.name;
+			Reflect.setField(props, type.idCol.name, id);
+		}
+		return props;
+	}
+
 	function fillProps( edit, e : PrefabElement ) {
 		e.edit(edit);
+
+		var typeName = e.getCdbType();
+		if( typeName == null && e.props != null )
+			return; // don't allow CDB data with props already used !
+
+		var types = DataFiles.getAvailableTypes();
+		if( types.length == 0 )
+			return;
+
+		var group = new hide.Element('
+			<div class="group" name="CDB">
+				<dl>
+				<dt>
+					<div class="btn-cdb-large fa fa-file-text"></div>
+					Type
+				</dt>
+				<dd><select><option value="">- No props -</option></select></dd>
+			</div>
+		');
+
+		var cdbLarge = @:privateAccess view.getDisplayState("cdbLarge");
+		group.find(".btn-cdb-large").click((_) -> {
+			cdbLarge = !cdbLarge;
+			@:privateAccess view.saveDisplayState("cdbLarge", cdbLarge);
+			group.toggleClass("cdb-large", cdbLarge);
+		});
+		group.toggleClass("cdb-large", cdbLarge == true);
+
+		var select = group.find("select");
+		for(t in types) {
+			var id = DataFiles.getTypeName(t);
+			new hide.Element("<option>").attr("value", id).text(id).appendTo(select);
+		}
+
+		var curType = DataFiles.resolveType(typeName);
+		if(curType != null) select.val(DataFiles.getTypeName(curType));
+
+		function changeProps(props: Dynamic) {
+			properties.undo.change(Field(e, "props", e.props), ()->edit.rebuildProperties());
+			e.props = props;
+			edit.onChange(e, "props");
+			edit.rebuildProperties();
+		}
+
+		select.change(function(v) {
+			var typeId = select.val();
+			if(typeId == null || typeId == "") {
+				changeProps(null);
+				return;
+			}
+			var props = makeCdbProps(e, DataFiles.resolveType(typeId));
+			changeProps(props);
+		});
+
+		edit.properties.add(group);
+
+		if(curType != null) {
+			var props = new hide.Element('<div></div>').appendTo(group.find(".content"));
+			var editor = new hide.comp.cdb.ObjEditor(curType, view.config, e.props, props);
+			editor.undo = properties.undo;
+			editor.fileView = view;
+			editor.onChange = function(pname) {
+				edit.onChange(e, 'props.$pname');
+				var e = Std.instance(e, hrt.prefab.l3d.Instance);
+				if( e != null ) e.addRanges(context.shared.contexts.get(e));
+			}
+		}
 	}
 
 	public function showProps(e: PrefabElement) {
@@ -1303,7 +1470,6 @@ class SceneEditor {
 	}
 
 	function setObjectSelected( p : PrefabElement, ctx : hrt.prefab.Context, b : Bool ) {
-		showGizmo = true;
 		return p.setSelected(ctx, b);
 	}
 
@@ -1325,13 +1491,19 @@ class SceneEditor {
 			case Nothing, NoTree:
 			}
 
+			function getSelContext( e : PrefabElement ) {
+				var ectx = context.shared.contexts.get(e);
+				if( ectx == null ) ectx = context.shared.getContexts(e)[0];
+				if( ectx == null ) ectx = context;
+				return ectx;
+			}
+
 			var map = new Map<PrefabElement,Bool>();
 			function selectRec(e : PrefabElement, b:Bool) {
 				if( map.exists(e) )
 					return;
 				map.set(e, true);
-				var ectx = context.shared.contexts.get(e);
-				if(setObjectSelected(e, ectx == null ? context : ectx, b))
+				if(setObjectSelected(e, getSelContext(e), b))
 					for( e in e.children )
 						selectRec(e,b);
 			}
@@ -1342,12 +1514,17 @@ class SceneEditor {
 			edit.cleanups.push(function() {
 				for( e in map.keys() ) {
 					if( hasBeenRemoved(e) ) continue;
-					var ectx = context.shared.contexts.get(e);
-					setObjectSelected(e, ectx == null ? context : ectx, false);
+					setObjectSelected(e, getSelContext(e), false);
 				}
 			});
 
 			curEdit = edit;
+			showGizmo = false;
+			for( e in elts )
+				if( !isLocked(e) ) {
+					showGizmo = true;
+					break;
+				}
 			setupGizmo();
 		}
 
@@ -1363,12 +1540,19 @@ class SceneEditor {
 	}
 
 	function hasBeenRemoved( e : hrt.prefab.Prefab ) {
-		while( e != null && e != sceneData ) {
+		var root = sceneData;
+		var eltCtx = context.shared.getContexts(e)[0];
+		if( eltCtx != null && eltCtx.shared.parent != null ) {
+			if( hasBeenRemoved(eltCtx.shared.parent.prefab) )
+				return true;
+			root = null;
+		}
+		while( e != null && e != root ) {
 			if( e.parent != null && e.parent.children.indexOf(e) < 0 )
 				return true;
 			e = e.parent;
 		}
-		return e == null;
+		return e != root;
 	}
 
 	public function resetCamera() {
@@ -1376,6 +1560,7 @@ class SceneEditor {
 			cameraController2D.initFromScene();
 		} else {
 			scene.s3d.camera.zNear = scene.s3d.camera.zFar = 0;
+			scene.s3d.camera.fovY = 25; // reset to default fov
 			scene.resetCamera(1.5);
 			cameraController.lockZPlanes = scene.s3d.camera.zNear != 0;
 			cameraController.loadFromCamera();
@@ -1383,7 +1568,7 @@ class SceneEditor {
 	}
 
 	public function getPickTransform(parent: PrefabElement) {
-		var proj = screenToWorld(scene.s2d.mouseX, scene.s2d.mouseY);
+		var proj = screenToGround(scene.s2d.mouseX, scene.s2d.mouseY);
 		if(proj == null) return null;
 
 		var localMat = new h3d.Matrix();
@@ -1399,14 +1584,29 @@ class SceneEditor {
 		return localMat;
 	}
 
-	public function dropObjects(paths: Array<String>, parent: PrefabElement) {
+	public function onDragDrop( items : Array<String>, isDrop : Bool ) {
+		var supported = @:privateAccess hrt.prefab.Library.registeredExtensions;
+		var paths = [];
+		for(path in items) {
+			var ext = haxe.io.Path.extension(path).toLowerCase();
+			if( supported.exists(ext) || ext == "fbx" || ext == "hmd" )
+				paths.push(path);
+		}
+		if( paths.length == 0 )
+			return false;
+		if(isDrop)
+			dropObjects(paths, sceneData);
+		return true;
+	}
+
+	function dropObjects(paths: Array<String>, parent: PrefabElement) {
 		scene.setCurrent();
 		var localMat = getPickTransform(parent);
 		if(localMat == null) return;
 
-		localMat.tx = hxd.Math.round(localMat.tx);
-		localMat.ty = hxd.Math.round(localMat.ty);
-		localMat.tz = hxd.Math.round(localMat.tz);
+		localMat.tx = hxd.Math.round(localMat.tx * 10) / 10;
+		localMat.ty = hxd.Math.round(localMat.ty * 10) / 10;
+		localMat.tz = hxd.Math.floor(localMat.tz * 10) / 10;
 
 		var elts: Array<PrefabElement> = [];
 		for(path in paths) {
@@ -1663,44 +1863,36 @@ class SceneEditor {
 
 	public function setVisible(elements : Array<PrefabElement>, visible: Bool) {
 		for(o in elements) {
-			if(visible) {
-				for(c in o.flatten(Object3D)) {
+			for(c in o.flatten(Object3D)) {
+				if( visible )
 					hideList.remove(c);
-					var el = tree.getElement(c);
-					applyTreeStyle(c, el);
-					applySceneStyle(c);
-				}
-			}
-			else {
-				hideList.set(o, true);
-				var el = tree.getElement(o);
-				applyTreeStyle(o, el);
-				applySceneStyle(o);
+				else
+					hideList.set(o, true);
+				var el = tree.getElement(c);
+				applyTreeStyle(c, el);
+				applySceneStyle(c);
 			}
 		}
 		saveDisplayState();
 	}
 
-	public function setLock(elements : Array<PrefabElement>, unlocked: Bool) {
+	function setLock(elements : Array<PrefabElement>, locked: Bool) {
 		for(o in elements) {
-			if(unlocked) {
-				for(c in o.flatten(Object3D)) {
-					lockList.remove(c);
-					var el = tree.getElement(c);
-					applyTreeStyle(c, el);
-					applySceneStyle(c);
-				}
-			}
-			else {
-				for(c in o.flatten(Object3D)) {
+			for(c in o.flatten(Object3D) ) {
+				if( locked )
 					lockList.set(c, true);
-					var el = tree.getElement(c);
-					applyTreeStyle(c, el);
-					applySceneStyle(c);
-				}
+				else
+					lockList.remove(c);
+				var el = tree.getElement(c);
+				applyTreeStyle(c, el);
+				applySceneStyle(c);
 			}
 		}
 		saveDisplayState();
+		showGizmo = !locked;
+		moveGizmoToSelection();
+		for( e in elements )
+			toggleInteractive(e,!locked);
 	}
 
 	function isolate(elts : Array<PrefabElement>) {
@@ -1709,9 +1901,7 @@ class SceneEditor {
 		function hideSiblings(elt: PrefabElement) {
 			var p = elt.parent;
 			for(c in p.children) {
-				var needsVisible = c == elt
-					|| toShow.indexOf(c) >= 0
-					|| hasChild(c, toShow);
+				var needsVisible = c == elt || toShow.indexOf(c) >= 0 || hasChild(c, toShow);
 				if(!needsVisible) {
 					toHide.push(c);
 				}
@@ -1837,6 +2027,7 @@ class SceneEditor {
 
 		function refreshFunc(then) {
 			refresh(fullRefresh ? Full : Partial, then);
+			if( !fullRefresh ) refreshParents(elts);
 		}
 
 		if (doRefresh)
@@ -1997,8 +2188,15 @@ class SceneEditor {
 
 	// Override
 	function makeEditContext(elts : Array<PrefabElement>) : SceneEditorContext {
-		var edit = new SceneEditorContext(context, elts, this);
-		edit.prefabPath = view.state.path;
+		var p = elts[0];
+		var rootCtx = context;
+		while( p != null ) {
+			var ctx = context.shared.getContexts(p)[0];
+			if( ctx != null ) rootCtx = ctx;
+			p = p.parent;
+		}
+		// rootCtx might not be == context depending on references
+		var edit = new SceneEditorContext(rootCtx, elts, this);
 		edit.properties = properties;
 		edit.scene = scene;
 		return edit;
@@ -2069,8 +2267,11 @@ class SceneEditor {
 			}
 		sortByLabel(gother);
 		sortByLabel(newItems);
-		if( gother.length > 0 )
+		if( gother.length > 0 ) {
+			if( newItems.length == 0 )
+				return gother;
 			newItems.push({ label : "Other", menu : gother });
+		}
 		return newItems;
 	}
 
@@ -2138,30 +2339,66 @@ class SceneEditor {
 		};
 	}
 
-	public function getZ(x: Float, y: Float) {
-		var offset = 1000;
+	public function getZ(x: Float, y: Float, ?paintOn : hrt.prefab.Prefab) {
+		var offset = 1000000;
 		var ray = h3d.col.Ray.fromValues(x, y, offset, 0, 0, -1);
-		var dist = projectToGround(ray);
+		var dist = projectToGround(ray, paintOn);
 		if(dist >= 0) {
 			return offset - dist;
 		}
 		return 0.;
 	}
 
-	public function projectToGround(ray: h3d.col.Ray) {
+	function getGroundPrefabs() : Array<PrefabElement> {
+		function getAll(data:PrefabElement) {
+			var all = data.findAll((p) -> p);
+			for( a in all.copy() ) {
+				var r = Std.downcast(a, hrt.prefab.Reference);
+				if( r != null ) {
+					var sub = @:privateAccess r.ref;
+					if( sub != null ) all = all.concat(getAll(sub));
+				}
+			}
+			return all;
+		}
+		return getAll(sceneData);
+	}
+
+	public function projectToGround(ray: h3d.col.Ray, ?paintOn : hrt.prefab.Prefab ) {
 		var minDist = -1.;
+
+		for( elt in (paintOn == null ? getGroundPrefabs() : [paintOn]) ) {
+			var obj = Std.downcast(elt, Object3D);
+			if( obj == null ) continue;
+			var ctx = getContext(elt);
+			if( ctx == null ) continue;
+
+			var lray = ray.clone();
+			lray.transform(ctx.local3d.getInvPos());
+			var dist = obj.localRayIntersection(ctx, lray);
+			if( dist > 0 ) {
+				var pt = lray.getPoint(dist);
+				pt.transform(ctx.local3d.getAbsPos());
+				var dist = pt.sub(ray.getPos()).length();
+				if( minDist < 0 || dist < minDist )
+					minDist = dist;
+			}
+		}
+		if( minDist >= 0 )
+			return minDist;
+
 		var zPlane = h3d.col.Plane.Z(0);
 		var pt = ray.intersect(zPlane);
-		if(pt != null) {
+		if( pt != null )
 			minDist = pt.sub(ray.getPos()).length();
-		}
+
 		return minDist;
 	}
 
-	public function screenToWorld(sx: Float, sy: Float) {
+	public function screenToGround(sx: Float, sy: Float, ?paintOn : hrt.prefab.Prefab ) {
 		var camera = scene.s3d.camera;
 		var ray = camera.rayFromScreen(sx, sy);
-		var dist = projectToGround(ray);
+		var dist = projectToGround(ray, paintOn);
 		if(dist >= 0) {
 			return ray.getPoint(dist);
 		}
@@ -2301,13 +2538,13 @@ class SceneEditor {
 
 	static function getPivot(objects: Array<Object>) {
 		if (customPivot != null) {
-			return customPivot.mesh.localToGlobal(customPivot.locPos.clone());
+			return customPivot.mesh.localToGlobal(customPivot.locPos.toPoint());
 		}
-		var pos = new h3d.Vector();
+		var pos = new h3d.col.Point();
 		for(o in objects) {
-			pos = pos.add(o.getAbsPos().getPosition());
+			pos = pos.add(o.getAbsPos().getPosition().toPoint());
 		}
-		pos.scale3(1.0 / objects.length);
+		pos.scale(1.0 / objects.length);
 		return pos;
 	}
 

@@ -36,7 +36,12 @@ class Object3D extends Prefab {
 		return { x : x, y : y, z : z, scaleX : scaleX, scaleY : scaleY, scaleZ : scaleZ, rotationX : rotationX, rotationY : rotationY, rotationZ : rotationZ };
 	}
 
+	public function localRayIntersection( ctx : Context, ray : h3d.col.Ray ) : Float {
+		return -1;
+	}
+
 	override function load( obj : Dynamic ) {
+		super.load(obj);
 		x = obj.x == null ? 0. : obj.x;
 		y = obj.y == null ? 0. : obj.y;
 		z = obj.z == null ? 0. : obj.z;
@@ -61,7 +66,7 @@ class Object3D extends Prefab {
 	}
 
 	override function save() {
-		var o : Dynamic = {};
+		var o : Dynamic = super.save();
 		if( x != 0 ) o.x = x;
 		if( y != 0 ) o.y = y;
 		if( z != 0 ) o.z = z;
@@ -98,7 +103,23 @@ class Object3D extends Prefab {
 		return m;
 	}
 
-	public function applyPos( o : h3d.scene.Object ) {
+	public function getAbsPos() {
+		var p = parent;
+		while( p != null ) {
+			var obj = p.to(Object3D);
+			if( obj == null ) {
+				p = p.parent;
+				continue;
+			}
+			var m = getTransform();
+			var abs = obj.getAbsPos();
+			m.multiply3x4(m, abs);
+			return m;
+		}
+		return getTransform();
+	}
+
+	public function applyTransform( o : h3d.scene.Object ) {
 		o.x = x;
 		o.y = y;
 		o.z = z;
@@ -110,7 +131,7 @@ class Object3D extends Prefab {
 
 	override function updateInstance( ctx: Context, ?propName : String ) {
 		var o = ctx.local3d;
-		applyPos(o);
+		applyTransform(o);
 		o.visible = visible;
 	}
 
@@ -143,7 +164,7 @@ class Object3D extends Prefab {
 		return true;
 	}
 
-	public function makeInteractive( ctx : Context ) : h3d.scene.Interactive {
+	override function makeInteractive( ctx : Context ) : hxd.SceneEvents.Interactive {
 		var local3d = ctx.local3d;
 		if(local3d == null)
 			return null;
@@ -151,6 +172,15 @@ class Object3D extends Prefab {
 		var invRootMat = local3d.getAbsPos().clone();
 		invRootMat.invert();
 		var bounds = new h3d.col.Bounds();
+		var localBounds = [];
+		var totalSeparateBounds = 0.;
+		var visibleMeshes = [];
+		var hasSkin = false;
+
+		inline function getVolume(b:h3d.col.Bounds) {
+			var c = b.getSize();
+			return c.x * c.y * c.z;
+		}
 		for(mesh in meshes) {
 			if(mesh.ignoreCollide)
 				continue;
@@ -165,16 +195,43 @@ class Object3D extends Prefab {
 
 			var localMat = mesh.getAbsPos().clone();
 			localMat.multiply(localMat, invRootMat);
+
+			if( mesh.primitive == null ) continue;
+			visibleMeshes.push(mesh);
+
+			if( Std.downcast(mesh, h3d.scene.Skin) != null ) {
+				hasSkin = true;
+				continue;
+			}
+
 			var lb = mesh.primitive.getBounds().clone();
 			lb.transform(localMat);
 			bounds.add(lb);
+
+			totalSeparateBounds += getVolume(lb);
+			for( b in localBounds ) {
+				var tmp = new h3d.col.Bounds();
+				tmp.intersection(lb, b);
+				totalSeparateBounds -= getVolume(tmp);
+			}
+			localBounds.push(lb);
 		}
-		var meshCollider = new h3d.col.Collider.GroupCollider([for(m in meshes) {
+		if( visibleMeshes.length == 0 )
+			return null;
+		var colliders = [for(m in visibleMeshes) {
 			var c : h3d.col.Collider = try m.getGlobalCollider() catch(e: Dynamic) null;
 			if(c != null) c;
-		}]);
-		var boundsCollider = new h3d.col.ObjectCollider(local3d, bounds);
-		var int = new h3d.scene.Interactive(boundsCollider, local3d);
+		}];
+		var meshCollider = colliders.length == 1 ? colliders[0] : new h3d.col.Collider.GroupCollider(colliders);
+		var collider : h3d.col.Collider = new h3d.col.ObjectCollider(local3d, bounds);
+		if( hasSkin ) {
+			collider = meshCollider; // can't trust bounds
+			meshCollider = null;
+		} else if( totalSeparateBounds / getVolume(bounds) < 0.5 ) {
+			collider = new h3d.col.Collider.OptimizedCollider(collider, meshCollider);
+			meshCollider = null;
+		}
+		var int = new h3d.scene.Interactive(collider, local3d);
 		int.ignoreParentTransform = true;
 		int.preciseShape = meshCollider;
 		int.propagateEvents = true;
@@ -206,9 +263,10 @@ class Object3D extends Prefab {
 
 	override function getHideProps() : HideProps {
 		// Check children
+		var cname = Type.getClassName(Type.getClass(this)).split(".").pop();
 		return {
 			icon : children == null || children.length > 0 ? "folder-open" : "genderless",
-			name : "Group"
+			name : cname == "Object3D" ? "Group" : cname,
 		};
 	}
 	#end

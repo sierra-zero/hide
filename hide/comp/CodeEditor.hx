@@ -2,17 +2,21 @@ package hide.comp;
 
 class CodeEditor extends Component {
 
-	var editor : monaco.Editor;
+	var editor : monaco.ScriptEditor;
 	var errorMessage : Element;
 	var currrentDecos : Array<String> = [];
 	public var code(get,never) : String;
+	public var propagateKeys : Bool = false;
 
 	public function new( code : String, lang : String, ?parent : Element, ?root : Element ) {
 		super(parent,root);
 		var root = element;
 		root.addClass("codeeditor");
-		root.on("keydown", function(e) { if( e.keyCode == 27 && root.find(".suggest-widget.visible").length == 0 ) onClose(); e.stopPropagation(); });
-		editor = monaco.Editor.create(root[0],{
+		root.on("keydown", function(e) {
+			if( e.keyCode == 27 && root.find(".suggest-widget.visible").length == 0 ) onClose();
+			if( !propagateKeys ) e.stopPropagation();
+		});
+		editor = monaco.ScriptEditor.create(root[0],{
 			value : code,
 			language : lang == null ? "javascript" : lang,
 			automaticLayout : true,

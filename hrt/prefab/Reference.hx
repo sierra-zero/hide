@@ -4,6 +4,7 @@ class Reference extends Object3D {
 
 	public var refpath : String;
 	var ref: Prefab = null;
+	var editMode : Bool = false;
 
 	public function new(?parent) {
 		super(parent);
@@ -19,12 +20,18 @@ class Reference extends Object3D {
 		var obj : Dynamic = super.save();
 		// Recalc abs path if ref has been resolved to supprot renaming
 		obj.refpath = ref != null && !isFile() ? ref.getAbsPath() : refpath;
+		obj.editMode = editMode;
+		#if editor
+		if( editMode && isFile() && ref != null )
+			hide.Ide.inst.savePrefab(refpath.substr(1), ref);
+		#end
 		return obj;
 	}
 
 	override function load( o : Dynamic ) {
 		super.load(o);
 		refpath = o.refpath;
+		editMode = o.editMode;
 	}
 
 	public function resolveRef(shared : hrt.prefab.ContextShared) {
@@ -35,7 +42,7 @@ class Reference extends Object3D {
 		if(isFile()) {
 			if(shared == null) { // Allow resolving ref in Hide prefore makeInstance
 				#if editor
-				ref = hide.Ide.inst.loadPrefab(refpath.substr(1));
+				ref = hide.Ide.inst.loadPrefab(refpath.substr(1), null, true);
 				#else
 				return null;
 				#end
@@ -78,24 +85,28 @@ class Reference extends Object3D {
 
 		if(isFile()) {
 			ctx = super.makeInstance(ctx);
-			ctx.isRef = true;
-			p.make(ctx);
+			var prevShared = ctx.shared;
+			ctx.shared = ctx.shared.cloneRef(this, refpath.substr(1));
+			makeChildren(ctx, p);
+			ctx.shared = prevShared;
 
 			#if editor
-			var path = hide.Ide.inst.appPath + "/res/icons/fileRef.png";
-			var data = sys.io.File.getBytes(path);
-			var tile = hxd.res.Any.fromBytes(path, data).toTile().center();
-			var objFollow = new h2d.ObjectFollower(ctx.local3d, ctx.shared.root2d);
-			objFollow.followVisibility = true;
-			var bmp = new h2d.Bitmap(tile, objFollow);
-			ctx.local2d = objFollow;
+			if (ctx.local2d == null) {
+				var path = hide.Ide.inst.appPath + "/res/icons/fileRef.png";
+				var data = sys.io.File.getBytes(path);
+				var tile = hxd.res.Any.fromBytes(path, data).toTile().center();
+				var objFollow = new h2d.ObjectFollower(ctx.local3d, ctx.shared.root2d);
+				objFollow.followVisibility = true;
+				var bmp = new h2d.Bitmap(tile, objFollow);
+				ctx.local2d = objFollow;
+			}
 			#end
 
 		}
 		else {
 			ctx = ctx.clone(this);
-			ctx.isRef = true;
-			var refCtx = p.make(ctx);
+			ctx.isSceneReference = true;
+			var refCtx = p.make(ctx); // no customMake here
 			ctx.local3d = refCtx.local3d;
 			updateInstance(ctx);
 		}
@@ -129,6 +140,7 @@ class Reference extends Object3D {
 			<div class="group" name="Reference">
 			<dl>
 				<dt>Reference</dt><dd><input type="text" field="refpath"/></dd>
+				<dt>Edit</dt><dd><input type="checkbox" field="editMode"/></dd>
 			</dl>
 			</div>');
 
@@ -139,9 +151,19 @@ class Reference extends Object3D {
 		}
 		updateProps();
 
+		element.find("input").contextmenu((e) -> {
+			e.preventDefault();
+			if( isFile() ) {
+				new hide.comp.ContextMenu([{
+					label : "Open",
+					click : () -> ctx.ide.openFile(ctx.ide.getPath(refpath.substr(1))),
+				}]);
+			}
+		});
+
 		var props = ctx.properties.add(element, this, function(pname) {
 			ctx.onChange(this, pname);
-			if(pname == "refpath") {
+			if(pname == "refpath" || pname=="editMode") {
 				ref = null;
 				updateProps();
 				if(!ctx.properties.isTempChange)

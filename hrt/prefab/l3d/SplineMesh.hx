@@ -32,8 +32,7 @@ class SplineMeshShader extends hxsl.Shader {
 			// Linear Interpolation between two samples
 			var s1 = clamp(floor(pos / stepSize), 0.0, POINT_COUNT - 1.0).int();
 			var s2 = clamp(ceil(pos / stepSize), 0.0, POINT_COUNT - 1.0).int();
-			var t = (pos - (s1 * stepSize)) / stepSize;
-			t.saturate();
+			var t = saturate((pos - (s1 * stepSize)) / stepSize);
 			var point = mix(points[s1 * 2], points[s2 * 2], t).xyz;
 			var tangent = mix(points[s1 * 2 + 1], points[s2 * 2 + 1], t).xyz;
 
@@ -147,26 +146,6 @@ class SplineMesh extends Spline {
 	override function make(ctx: Context) {
 		// Don't make children, which are used to setup the material
 		return makeInstance(ctx);
-	}
-
-	override function makeInstance( ctx : hrt.prefab.Context ) : hrt.prefab.Context {
-		var ctx = ctx.clone(this);
-		ctx.local3d = new h3d.scene.Object(ctx.local3d);
-		ctx.local3d.name = name;
-
-		for( pd in pointsData ) {
-			var sp = new SplinePoint(0, 0, 0, ctx.local3d);
-			sp.setTransform(pd);
-			sp.getAbsPos();
-			points.push(sp);
-		}
-		pointsData = [];
-
-		if( points == null || points.length == 0 )
-			points.push(new SplinePoint(0,0,0, ctx.local3d));
-
-		updateInstance(ctx);
-		return ctx;
 	}
 
 	override function updateInstance( ctx : hrt.prefab.Context , ?propName : String ) {

@@ -17,6 +17,7 @@ typedef HideGlobalConfig = {
 typedef HideProjectConfig = {
 	var layouts : Array<{ name : String, state : LayoutState }>;
 	var renderer : String;
+	var dbCategories : Array<String>;
 };
 
 typedef ConfigDef = {
@@ -128,7 +129,7 @@ class Config {
 				autoSaveLayout : true,
 				layouts : null,
 				recentProjects : [],
-				currentProject : projectPath,
+				currentProject : "",
 				windowPos : null,
 				renderer : null,
 			};
@@ -140,7 +141,7 @@ class Config {
 		projectUserCustom.load(nw.App.dataPath + "/" + projectPath.split("\\").join("/").split("/").join("_").split(":").join("_") + ".json");
 		var p = projectUserCustom;
 		if( p.source.hide == null )
-			p.source.hide = ({ layouts : [], renderer : null } : HideProjectConfig);
+			p.source.hide = ({ layouts : [], renderer : null, dbCategories: null } : HideProjectConfig);
 
 		var current = new Config(projectUserCustom);
 

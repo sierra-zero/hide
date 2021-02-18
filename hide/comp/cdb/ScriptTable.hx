@@ -33,10 +33,33 @@ class ScriptTable extends SubTable {
 		var first = script == null;
 		element.html("<div class='cdb-script'></div>");
 		var div = element.children("div");
-		div.on("keypress keydown keyup", (e) -> e.stopPropagation());
-		var checker = new ScriptEditor.ScriptChecker(editor.config,"cdb."+cell.getDocumentName(),[ "cdb."+cell.table.sheet.name => cell.line.obj ]);
+		var ids = [];
+		var table = cell.table;
+		var obj = cell.line.obj;
+		while( table != null ) {
+			var idCol = table.getRealSheet().idCol;
+			if( idCol != null ) {
+				var id = Reflect.field(obj, idCol.name);
+				if( id == null ) id = "#";
+				ids.unshift(id);
+			}
+			var st = Std.downcast(table, SubTable);
+			table = table.parent;
+			if( st != null ) obj = st.cell.line.obj;
+		}
+
+		div.on("keypress keydown keyup", (e) -> {
+			// let pass Ctrl+S if ObjEditor (allow save script)
+			if( e.keyCode != "S".code || !Std.is(editor, ObjEditor) ) e.stopPropagation();
+		});
+		var checker = new ScriptEditor.ScriptChecker(editor.config,"cdb."+cell.getDocumentName(),[
+			"cdb."+cell.table.sheet.name => cell.line.obj,
+			"cdb.objID" => ids.join(":"),
+			"cdb.groupID" => cell.line.getGroupID(),
+		]);
 		script = new ScriptEditor(cell.value, checker, div);
 		script.onSave = saveValue;
+		script.propagateKeys = true;
 		script.onClose = function() { close(); cell.focus(); }
 		lines = [new Line(this,[],0,script.element)];
 		insertedTR.addClass("code");

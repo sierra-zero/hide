@@ -14,7 +14,6 @@ typedef ExtensionDesc = {
 class FileTree extends FileView {
 
 	var tree : hide.comp.IconTree<String>;
-	var lastOpen : hide.ui.View<Dynamic>;
 	var ignorePatterns : Array<EReg> = [];
 
 	public function new(state) {
@@ -35,6 +34,8 @@ class FileTree extends FileView {
 				rebuild();
 			});
 		}
+
+		keys.register("search", function() tree.openFilter());
 	}
 
 	static function getExtension( file : String ) {
@@ -99,29 +100,16 @@ class FileTree extends FileView {
 
 		tree.onRename = onRename;
 
-		// prevent dummy mouseLeft from breaking our quickOpen feature
-		var mouseLeft = false;
-		var leftCount = 0;
-		element.on("mouseenter", function(_) {
-			mouseLeft = false;
-		});
-		element.on("mouseleave", function(_) {
-			mouseLeft = true;
-			leftCount++;
-			var k = leftCount;
-			if( lastOpen != null )
-				haxe.Timer.delay(function() {
-					if( !mouseLeft || leftCount != k ) return;
-					lastOpen = null;
-				},1000);
-		});
 		element.contextmenu(function(e) {
 			var current = tree.getCurrentOver();
 			if( current != null )
 				tree.setSelection([current]);
 			e.preventDefault();
-			var newMenu = [for( e in EXTENSIONS ) if( e.options.createNew != null ) { label : e.options.createNew, click : createNew.bind(current, e) }];
-			newMenu.unshift({ label : "Directory", click : createNew.bind(current, { options : { createNew : "Directory" }, extensions : null, component : null }) });
+			var allowedNew : Array<String> = config.get("filetree.allowednew");
+			function allowed( ext : String ) return allowedNew.indexOf(ext) >= 0 || allowedNew.indexOf("*") >= 0;
+			var newMenu = [for( e in EXTENSIONS ) if( e.options.createNew != null && Lambda.exists(e.extensions, allowed) ) { label : e.options.createNew, click : createNew.bind(current, e) }];
+			if( allowed("dir") )
+				newMenu.unshift({ label : "Directory", click : createNew.bind(current, { options : { createNew : "Directory" }, extensions : null, component : null }) });
 			new hide.comp.ContextMenu([
 				{ label : "New..", menu:newMenu },
 				{ label : "Explore", enabled : current != null, click : function() { onExploreFile(current); } },
@@ -174,40 +162,135 @@ class FileTree extends FileView {
 		var newPath = name.charAt(0) == "/" ? name.substr(1) : parts.join("/");
 
 		if( sys.FileSystem.exists(ide.getPath(newPath)) ) {
-			if( !ide.confirm(newPath+" already exists, invert files?") )
-				return false;
-			var rand = "__tmp"+Std.random(10000);
-			onRename(path, "/"+path+rand);
-			onRename(newPath, "/"+path);
-			onRename(path+rand, name);
+			if( path.toLowerCase() == newPath.toLowerCase() ) {
+				// case change
+				var rand = "__tmp"+Std.random(10000);
+				onRename(path, "/"+path+rand);
+				onRename(path+rand, name);
+			} else {
+				if( !ide.confirm(newPath+" already exists, invert files?") )
+					return false;
+				var rand = "__tmp"+Std.random(10000);
+				onRename(path, "/"+path+rand);
+				onRename(newPath, "/"+path);
+				onRename(path+rand, name);
+			}
 			return false;
 		}
 
 		var isDir = sys.FileSystem.isDirectory(ide.getPath(path));
-		if( isDir )
-			throw "TODO : rename directory";
-		ide.filterPrefabs(function(p:hrt.prefab.Prefab) {
-			var changed = false;
-			function filter(p:String) {
-				if( p == null )
-					return null;
-				if( p == path ) {
-					changed = true;
-					return newPath;
+		var wasRenamed = false;
+		if( sys.FileSystem.exists(ide.projectDir+"/.svn") ) {
+			if( js.node.ChildProcess.spawnSync("svn",["--version"]).status != 0 ) {
+				if( isDir && !ide.confirm("Renaming a SVN directory, but 'svn' system command was not found. Continue ?") )
+					return false;
+			} else {
+				var cwd = Sys.getCwd();
+				Sys.setCwd(ide.resourceDir);
+				var code = Sys.command("svn",["rename",path,newPath]);
+				Sys.setCwd(cwd);
+				if( code == 0 )
+					wasRenamed = true;
+				else {
+					if( !ide.confirm("SVN rename failure, perform file rename ?") )
+						return false;
 				}
-				if( isDir && StringTools.startsWith(p,path+"/") ) {
-					changed = true;
-					return newPath + p.substr(path.length, p.length - path.length);
-				}
-				return p;
 			}
+		}
+		if( !wasRenamed )
+			sys.FileSystem.rename(ide.getPath(path), ide.getPath(newPath));
+
+		var changed = false;
+		function filter(p:String) {
+			if( p == null )
+				return null;
+			if( p == path ) {
+				changed = true;
+				return newPath;
+			}
+			if( p == "/"+path ) {
+				changed = true;
+				return "/"+newPath;
+			}
+			if( isDir ) {
+				if( StringTools.startsWith(p,path+"/") ) {
+					changed = true;
+					return newPath + p.substr(path.length);
+				}
+				if( StringTools.startsWith(p,"/"+path+"/") ) {
+					changed = true;
+					return "/"+newPath + p.substr(path.length+1);
+				}
+			}
+			return p;
+		}
+
+		ide.filterPrefabs(function(p:hrt.prefab.Prefab) {
+			changed = false;
 			p.source = filter(p.source);
 			var h = p.getHideProps();
 			if( h.onResourceRenamed != null )
 				h.onResourceRenamed(filter);
+			else {
+				var visited = new Array<Dynamic>();
+				function browseRec(obj:Dynamic) : Dynamic {
+					switch( Type.typeof(obj) ) {
+					case TObject:
+						if( visited.indexOf(obj) >= 0 ) return null;
+						visited.push(obj);
+						for( f in Reflect.fields(obj) ) {
+							var v : Dynamic = Reflect.field(obj, f);
+							v = browseRec(v);
+							if( v != null ) Reflect.setField(obj, f, v);
+						}
+					case TClass(Array):
+						if( visited.indexOf(obj) >= 0 ) return null;
+						visited.push(obj);
+						var arr : Array<Dynamic> = obj;
+						for( i in 0...arr.length ) {
+							var v : Dynamic = arr[i];
+							v = browseRec(v);
+							if( v != null ) arr[i] = v;
+						}
+					case TClass(String):
+						return filter(obj);
+					default:
+					}
+					return null;
+				}
+				for( f in Reflect.fields(p) ) {
+					var v = browseRec(Reflect.field(p,f));
+					if( v != null ) Reflect.setField(p,f,v);
+				}
+			}
 			return changed;
 		});
-		sys.FileSystem.rename(ide.getPath(path), ide.getPath(newPath));
+
+		changed = false;
+		var tmpSheets = [];
+		for( sheet in ide.database.sheets ) {
+			if( sheet.props.dataFiles != null && sheet.lines == null ) {
+				// we already updated prefabs, no need to load data files
+				tmpSheets.push(sheet);
+				@:privateAccess sheet.sheet.lines = [];
+			}
+			for( c in sheet.columns ) {
+				switch( c.type ) {
+				case TFile:
+					for( o in sheet.getLines() ) {
+						var v : Dynamic = filter(Reflect.field(o, c.name));
+						if( v != null ) Reflect.setField(o, c.name, v);
+					}
+				default:
+				}
+			}
+		}
+		if( changed ) {
+			ide.saveDatabase();
+			hide.comp.cdb.Editor.refreshAll(true);
+		}
+		for( sheet in tmpSheets )
+			@:privateAccess sheet.sheet.lines = null;
 		return true;
 	}
 
@@ -270,12 +353,8 @@ class FileTree extends FileView {
 		var ext = getExtension(fullPath);
 		if( ext == null )
 			return false;
-		var prev = lastOpen;
-		lastOpen = null;
-		ide.openFile(fullPath, function(c) {
-			if( prev != null ) prev.close();
-			lastOpen = c;
-		});
+		ide.openFile(fullPath);
+		tree.closeFilter();
 		return true;
 	}
 

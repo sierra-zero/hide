@@ -2,9 +2,15 @@ package hide.view;
 
 class Script extends FileView {
 
-	var editor : monaco.Editor;
+	var editor : monaco.ScriptEditor;
 	var script : hide.comp.ScriptEditor;
 	var originData : String;
+
+	function getScriptChecker() {
+		if( extension != "hx" )
+			return null;
+		return new hide.comp.ScriptEditor.ScriptChecker(config,"hx");
+	}
 
 	override function onDisplay() {
 		element.addClass("script-editor");
@@ -16,15 +22,16 @@ class Script extends FileView {
 		default: "text";
 		}
 		originData = sys.io.File.getContent(getPath());
-		if( extension == "hx" ) {
-			script = new hide.comp.ScriptEditor(originData, new hide.comp.ScriptEditor.ScriptChecker(config,"hx"), element);
+		var checker = getScriptChecker();
+		if( checker != null ) {
+			script = new hide.comp.ScriptEditor(originData, checker, element);
 			script.onSave = function() onSave(script.code);
 			script.onChanged = function() {
 				modified = script.code != originData;
 				script.doCheckScript();
 			}
 		} else {
-			editor = monaco.Editor.create(element[0],{
+			editor = monaco.ScriptEditor.create(element[0],{
 				value : originData,
 				language : lang,
 				automaticLayout : true,

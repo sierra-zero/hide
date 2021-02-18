@@ -21,17 +21,27 @@ class FileView extends hide.ui.View<{ path : String }> {
 			}, { checkDelete : true, keepOnRebuild : true });
 	}
 
-	override function rebuild() {
-		saveDisplayKey = Type.getClassName(Type.getClass(this)) + ":" + getPath().split("\\").join("/");
-		super.rebuild();
+	override function onRebuild() {
+		var path = getPath();
+		if( path != null ) {
+			saveDisplayKey = Type.getClassName(Type.getClass(this)) + ":" + path.split("\\").join("/");
+			if( !sys.FileSystem.exists(path) ) {
+				element.html('${state.path} no longer exists');
+				return;
+			}
+		}
+		super.onRebuild();
+	}
+
+	function makeSign() {
+		var content = sys.io.File.getContent(getPath());
+		return haxe.crypto.Md5.encode(content);
 	}
 
 	function onFileChanged( wasDeleted : Bool, rebuildView = true ) {
-		if( !wasDeleted ) {
+		if( !wasDeleted && currentSign != null ) {
 			// double check if content has changed
-			var content = sys.io.File.getContent(getPath());
-			var sign = haxe.crypto.Md5.encode(content);
-			if( sign == currentSign )
+			if( makeSign() == currentSign )
 				return;
 		}
 		if( wasDeleted ) {
@@ -39,9 +49,11 @@ class FileView extends hide.ui.View<{ path : String }> {
 			element.html('${state.path} no longer exists');
 			return;
 		}
+
 		if( modified && !ide.confirm('${state.path} has been modified, reload and ignore local changes?') )
 			return;
 		modified = false;
+		lastSaveTag = 0;
 		undo.clear(); // prevent any undo that would reset past reload
 		if( rebuildView )
 			rebuild();
@@ -68,6 +80,8 @@ class FileView extends hide.ui.View<{ path : String }> {
 		keys.register("undo", function() undo.undo());
 		keys.register("redo", function() undo.redo());
 		keys.register("save", function() save());
+		keys.register("view.refresh", function() rebuild());
+		keys.register("view.refreshApp", function() untyped chrome.runtime.reload());
 	}
 
 	public function save() {

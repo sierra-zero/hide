@@ -16,8 +16,8 @@ class CameraController2D extends h2d.Object {
 	var moveX = 0.;
 	var moveY = 0.;
 	var pushTime : Float;
-	var curPos = new h3d.col.Point();
-	var targetPos = new h3d.col.Point();
+	var curPos = new h3d.col.Point(0,0,1);
+	var targetPos = new h3d.col.Point(0,0,1);
 
 	public function new(?parent) {
 		super(parent);
@@ -146,7 +146,7 @@ class CameraController2D extends h2d.Object {
 
 	function syncCamera() {
 		var scene = getScene();
-		//if( scene == null ) return;
+		if( scene == null ) return;
 		parent.setScale(curPos.z);
 		parent.x = scene.width * 0.5 - curPos.x * parent.scaleX;
 		parent.y = scene.height * 0.5 - curPos.y * parent.scaleY;

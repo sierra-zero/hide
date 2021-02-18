@@ -10,12 +10,12 @@ class EditContext {
 
 	var updates : Array<Float->Void> = [];
 
-	public var prefabPath : String;
 	public var ide(get,never) : hide.Ide;
 	public var scene : hide.comp.Scene;
 	public var properties : hide.comp.PropsEditor;
 	public var cleanups : Array<Void->Void>;
 	function get_ide() return hide.Ide.inst;
+
 	public function onChange(p : Prefab, propName : String) {
 		var ctx = getContext(p);
 		scene.setCurrent();
@@ -28,12 +28,9 @@ class EditContext {
 				parent = parent.parent;
 			}
 		}
-
-		var refs = rootContext.shared.references.get(p);
-		if(refs != null) {
-			for(ctx in refs)
-				p.updateInstance(ctx, propName);
-		}
+		for( ctx2 in rootContext.shared.getContexts(p) )
+			if( ctx2 != ctx )
+				p.updateInstance(ctx2, propName);
 	}
 
 	public function getCurrentProps( p : Prefab ) : Element {
@@ -53,6 +50,20 @@ class EditContext {
 			}
 	}
 
+	public function makeChanges( p : Prefab, f : Void -> Void ) @:privateAccess {
+		var current = p.save();
+		properties.undo.change(Custom(function(b) {
+			var old = p.save();
+			p.load(current);
+			current = old;
+			rebuildProperties();
+			onChange(p, null);
+		}));
+		f();
+		rebuildProperties();
+		onChange(p, null);
+	}
+
 	#end
 
 	public function new(ctx) {
@@ -61,6 +72,23 @@ class EditContext {
 
 	public function getContext( p : Prefab ) {
 		return rootContext.shared.contexts.get(p);
+	}
+
+	/**
+		Converts screen mouse coordinates into projection into ground.
+		If "forPrefab" is used, only this prefab is taken into account for ground consideration (self painting)
+	**/
+	public function screenToGround( x : Float, y : Float, ?forPrefab : Prefab ) : h3d.col.Point {
+		throw "Not implemented";
+		return null;
+	}
+
+	/**
+		Similar to screenToGround but based on 3D coordinates instead of screen ones
+	**/
+	public function positionToGroundZ( x : Float, y : Float, ?forPrefab : Prefab ) : Float {
+		throw "Not implemented";
+		return null;
 	}
 
 	/**

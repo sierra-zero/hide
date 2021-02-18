@@ -6,11 +6,16 @@ class ModalColumnForm extends Modal {
 
 	var contentModal : Element;
 	var form : Element;
+	var editor : Editor;
+	var sheet : cdb.Sheet;
 
-	public function new(base : cdb.Database, column : cdb.Data.Column, ?parent,?el) {
+	public function new( editor : Editor, sheet : cdb.Sheet, column : cdb.Data.Column, ?parent,?el) {
 		super(parent,el);
 
 		var editForm = (column != null);
+		var base = editor.base;
+		this.editor = editor;
+		this.sheet = sheet;
 
 		contentModal = new Element("<div tabindex='0'>").addClass("content-modal").appendTo(content);
 
@@ -88,6 +93,41 @@ class ModalColumnForm extends Modal {
 					<td><select name="ctype"></select>
 				</tr>
 
+				<tr class="scope">
+					<td>Scope
+					<td>
+					<select name="scope">
+					<option value="">Global</option>
+					</select>
+				</tr>
+
+				<tr class="formula hide">
+					<td>Formula</td>
+					<td>
+						<select name="formula">
+						<option value="">None</option>
+						</select>
+						<label><input type="checkbox" name="export" style="float:none;display:inline-block" checked/>&nbsp;Export</label>
+					</td>
+				</tr>
+
+				<tr class="doc hide">
+					<td>&nbsp;
+					<td><label><input type="checkbox" name="hidden"/>&nbsp;Hidden</label>
+				</tr>
+
+				<tr class="doc hide">
+					<td>Documentation
+					<td><textarea name="doc"></textarea>
+				</tr>
+
+				<tr class="more">
+					<td>
+						<a href="#" class="doctog can-hide">[+]</a>
+						<a href="#" class="doctog hide">[-]</a>
+					</td>
+				</tr>
+
 				<tr class="opt">
 					<td>&nbsp;
 					<td><label><input type="checkbox" name="req"/>&nbsp;Required</label>
@@ -106,11 +146,27 @@ class ModalColumnForm extends Modal {
 
 			</form>').appendTo(contentModal);
 
+		var parent = sheet.getParent();
+		if( parent == null )
+			form.find(".scope").remove();
+		else {
+			var scope = 1;
+			var scopes = form.find("[name=scope]");
+			var p = parent;
+			while( p != null ) {
+				if( p.s.idCol != null )
+					new Element("<option>").attr("value",""+scope).text(p.s.name).appendTo(scopes);
+				p = p.s.getParent();
+				scope++;
+			}
+		}
+
 		var sheets = form.find("[name=sheet]");
 		sheets.empty();
 		for( i in 0...base.sheets.length ) {
 			var s = base.sheets[i];
-			if( s.props.hide ) continue;
+			if( s.idCol == null ) continue;
+			if( s.idCol.scope != null && !StringTools.startsWith(sheet.name,s.name.split("@").slice(0,-s.idCol.scope).join("@")) ) continue;
 			new Element("<option>").attr("value", "" + i).text(s.name).appendTo(sheets);
 		}
 
@@ -126,6 +182,16 @@ class ModalColumnForm extends Modal {
 		for( t in base.getCustomTypes() )
 			new Element("<option>").attr("value", "" + t.name).text(t.name).appendTo(ctypes);
 
+		var cforms = form.find("[name=formula]");
+		for( f in editor.formulas.getList(sheet) )
+			new Element("<option>").attr("value", f.name).text(f.name).appendTo(cforms);
+
+		function toggleHide() {
+			form.find(".can-hide").toggleClass("hide");
+		}
+		form.find(".hide").addClass("can-hide");
+		form.find(".doctog").click(function(_) toggleHide());
+
 		if (editForm) {
 			form.addClass("edit");
 			form.find("[name=name]").val(column.name);
@@ -133,32 +199,43 @@ class ModalColumnForm extends Modal {
 			form.find("[name=req]").prop("checked", !column.opt);
 			form.find("[name=display]").val(column.display == null ? "0" : Std.string(column.display));
 			form.find("[name=kind]").val(column.kind == null ? "" : ""+column.kind);
+			form.find("[name=scope]").val(column.scope == null ? "" : ""+column.scope);
+			form.find("[name=hidden]").prop("checked", column.kind == Hidden);
+			if( column.documentation != null ) {
+				form.find("[name=doc]").val(column.documentation);
+				form.find(".doc").removeClass("hide");
+			}
 			switch( column.type ) {
 			case TEnum(values), TFlags(values):
 				form.find("[name=values]").val(values.join(","));
 			case TRef(sname), TLayer(sname):
-				form.find("[name=sheet]").val( "" + base.sheets.indexOf(base.getSheet(sname)));
+				var index = base.sheets.indexOf(base.getSheet(sname));
+				form.find("[name=sheet]").val( "" + index);
 			case TCustom(name):
 				form.find("[name=ctype]").val(name);
+			case TInt, TFloat:
+				var p = editor.getColumnProps(column);
+				form.find("[name=formula]").val( p.formula == null ? "" : p.formula );
+				form.find("[name=export]").prop( "checked", !p.ignoreExport );
 			default:
 			}
 		} else {
 			form.addClass("create");
 			form.find("input").not("[type=submit]").val("");
-			form.find("[name=req]").prop("checked", true);
+			var isProp = sheet.parent != null && sheet.parent.sheet.columns[sheet.parent.column].type == TProperties;
+			form.find("[name=req]").prop("checked", !isProp);
 			form.find("[name=kind]").val("");
 		}
 
 		form.find("[name=name]").focus();
 
-		contentModal.keydown(function(e) if( e.keyCode == 27 ) closeModal());
+		contentModal.keydown(function(e) { if( e.keyCode == 27 ) closeModal(); e.stopPropagation(); });
+		contentModal.keypress(function(e) e.stopPropagation());
 		contentModal.click( function(e) e.stopPropagation());
 
-		element.click(function(e) {
-			closeModal();
-		});
-
 		form.find("#cancelBtn").click(function(e) closeModal());
+		if( column != null && editor.getColumnProps(column).formula != null )
+			toggleHide();
 	}
 
 	public function setCallback(callback : (Void -> Void)) {
@@ -171,10 +248,10 @@ class ModalColumnForm extends Modal {
 		close();
 	}
 
-	public function getColumn(base : cdb.Database, sheet : cdb.Sheet, refColumn : cdb.Data.Column) : Column{
-
+	public function getColumn( refColumn : cdb.Data.Column) : Column{
+		var base = editor.base;
 		var v : Dynamic<String> = { };
-		var cols = form.find("input, select").not("[type=submit]");
+		var cols = form.find("input, select, textarea").not("[type=submit]");
 		for( i in cols.elements() )
 			Reflect.setField(v, i.attr("name"), i.attr("type") == "checkbox" ? (i.is(":checked")?"on":null) : i.val());
 
@@ -245,10 +322,31 @@ class ModalColumnForm extends Modal {
 		};
 		if( v.req != "on" ) c.opt = true;
 		if( v.display != "0" ) c.display = cast Std.parseInt(v.display);
+		c.kind = null;
 		switch( v.kind ) {
 		case "localizable": c.kind = Localizable;
 		case "script": c.kind = Script;
 		}
+		if( form.find("[name=hidden]").is(":checked") ) c.kind = Hidden;
+
+		var props = editor.getColumnProps(c);
+		switch( t ) {
+		case TFloat, TInt:
+			props.formula = form.find("[name=formula]").val();
+			if( props.formula == "" ) props.formula = null;
+			props.ignoreExport = props.formula != null && !form.find("[name=export]").is(":checked") ? true : null;
+		default:
+		}
+		if( t == TId && v.scope != "" ) c.scope = Std.parseInt(v.scope);
+		if( v.doc != "" ) c.documentation = v.doc;
+
+		var hasProp = false;
+		for( f in Reflect.fields(props) )
+			if( Reflect.field(props,f) == null )
+				Reflect.deleteField(props, f);
+			else
+				hasProp = true;
+		c.editor = hasProp ? props : js.Lib.undefined;
 		return c;
 	}
 
